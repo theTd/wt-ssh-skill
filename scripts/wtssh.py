@@ -3402,6 +3402,51 @@ def copy_to_clipboard(text: str) -> bool:
         return False
 
 
+def copy_text_to_clipboard(text: str) -> bool:
+    """UTF-8-safe clipboard copy for long-lived secrets (login passwords).
+
+    The password NEVER rides argv/env: pure-ASCII takes the clip.exe stdin
+    path above; non-ASCII goes through a UTF-8 file inside a make_run_dir
+    session dir (owner-only DACL + owner.pid, so the orphan sweeper reclaims
+    it after a kill -- the file itself is secure_write owner-only, then
+    overwrite-wiped with the dir) that powershell reads with Set-Clipboard
+    (argv carries only the file path). Any failure is fail-closed (returns
+    False) -- callers must never fall back to printing the secret."""
+    try:
+        text.encode("ascii")
+        return copy_to_clipboard(text)
+    except UnicodeEncodeError:
+        pass
+    ps_exe = find_bin("powershell")
+    if ps_exe is None:
+        return False
+    try:
+        rundir = make_run_dir(prefix=RUN_DIR_PREFIX + "clip-")
+    except BaseException:
+        return False
+    tmp_path = rundir / "pw"
+    try:
+        try:
+            secure_write(tmp_path, text.encode("utf-8"))
+        except BaseException:
+            return False
+        ps = ("$p=$args[0]; "
+              "$t=[IO.File]::ReadAllText($p,[Text.Encoding]::UTF8); "
+              "Set-Clipboard -Value $t")
+        try:
+            r = subprocess.run([ps_exe, "-NoProfile", "-Command", ps,
+                                str(tmp_path)],
+                               capture_output=True, timeout=15)
+            return r.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+    finally:
+        ok, err = secure_wipe_tree(rundir)
+        if not ok:
+            print(f"wtssh: warning: could not wipe clipboard staging dir "
+                  f"{rundir}: {err}", file=sys.stderr)
+
+
 def fz_sync_server(server, f: dict, args, warnings: list, *,
                    endpoint: tuple[str, str] | None = None,
                    session_keyfile: tuple[str, str] | None = None,
@@ -3545,6 +3590,39 @@ def action_filezilla(args):
             "first")
     warnings: list[str] = []
     tunneling = resolve_tunnel_mode(getattr(args, "tunnel", False), f["jump"])
+    to_clipboard = bool(getattr(args, "to_clipboard", False))
+    if to_clipboard:
+        # Explicit opt-in only: the long-lived login password leaves the
+        # vault for the clipboard (not a secret channel). Validate BEFORE
+        # any PIN gesture or site write; the native Yes/No below is the
+        # displayed secondary confirmation.
+        if getattr(args, "no_open", False):
+            die("--to-clipboard needs a launch; drop --no-open")
+        if getattr(args, "remove_site", False):
+            die("--to-clipboard cannot be combined with --remove-site")
+        if getattr(args, "keyfile", None):
+            die("--to-clipboard cannot be combined with --keyfile "
+                "(key auth needs no login password)")
+        if tunneling == "tunnel":
+            die("--to-clipboard is direct-only; entry "
+                f"'{name}' resolves to a tunnel -- use key auth or a "
+                "direct entry")
+        if f["key"] and is_key_ref(f["key"]):
+            die(f"entry '{name}' uses a vault key (wtv:...): it has no "
+                f"stored login password -- its session passphrase already "
+                f"goes to the clipboard automatically on launch")
+        elif f["key"]:
+            die(f"entry '{name}' binds a key file: its site is key-type "
+                f"(Logontype 5) with nowhere to paste a login password -- "
+                f"drop --to-clipboard, or unbind first "
+                f"(`wtssh edit {name} --key none`)")
+        if not secret_path(name).exists():
+            die(f"entry '{name}' has no stored passphrase "
+                f"(`wtssh secret set {name}` first, or type it in "
+                f"FileZilla's own password prompt)")
+        if not confirm_password_to_clipboard(name, entry_dest_label(p)):
+            die("password-to-clipboard confirmation declined; "
+                "FileZilla not launched", 2)
     if f["jump"] and tunneling != "tunnel":
         warnings.append(f"FileZilla SFTP cannot express a jump chain; the "
                         f"book jump '{f['jump']}' is ignored (direct "
@@ -3572,12 +3650,16 @@ def action_filezilla(args):
         # the mode exclusions fire only when auto actually resolved to a
         # tunnel: `--tunnel auto --no-open` on a jump-free entry is a legal
         # sync-only run, and --keyfile binds normally there
-        if args.keyfile:
+        # (getattr: only --to-clipboard is documented as optional on old
+        # test namespaces; tunnel/keyfile/remove_site/no_open always come
+        # from the parser, but getattr keeps direct action_filezilla callers
+        # from tripping on AttributeError either way)
+        if getattr(args, "keyfile", None):
             die("--tunnel generates the FileZilla key itself; --keyfile "
                 "conflicts with it")
-        if args.remove_site:
+        if getattr(args, "remove_site", False):
             die("--tunnel cannot be combined with --remove-site")
-        if args.no_open:
+        if getattr(args, "no_open", False):
             die("--tunnel opens FileZilla by definition; drop --no-open")
         port = fz_pick_port()
         keyname = None
@@ -3700,8 +3782,10 @@ def action_filezilla(args):
             # a plaintext book key needs no export: FileZilla reads it
             # directly, on either tunnel path
             session_keyfile = (os.path.normpath(expand_key(f["key"])), "book")
-    elif (f["key"] and is_key_ref(f["key"]) and not args.keyfile
-          and not args.remove_site and not args.no_open):
+    elif (f["key"] and is_key_ref(f["key"])
+          and not getattr(args, "keyfile", None)
+          and not getattr(args, "remove_site", False)
+          and not getattr(args, "no_open", False)):
         # Jump-free vault entry: FileZilla still cannot read wtv:, so export
         # an ephemeral encrypted PPK for THIS launch (same material as the
         # --tunnel session key, without a SOCKS proxy). Sync-only runs
@@ -3719,7 +3803,7 @@ def action_filezilla(args):
             tree = fz_load_tree(site_file)
             servers = tree.getroot().find("Servers")
             changed = False
-            if args.remove_site:
+            if getattr(args, "remove_site", False):
                 folder = fz_find_folder(servers, GROUP)
                 server = (fz_find_server(folder, name)
                           if folder is not None else None)
@@ -3790,7 +3874,47 @@ def action_filezilla(args):
         site_path = "0/" + "/".join(fz_escape_segment(s)
                                     for s in (GROUP, name))
         launched = False
-        if not args.remove_site and not args.no_open:
+        password_clipboard = False
+        if not getattr(args, "remove_site", False) \
+                and not getattr(args, "no_open", False):
+            if to_clipboard:
+                # Second gesture after the Yes/No above: TPM PIN unwrap,
+                # then clipboard only. The password is NEVER printed to
+                # stdout/stderr/JSON/logs; copy failure still launches
+                # (the ask-type site lets the user type manually).
+                # Order note: the site sync above already ran, so a PIN
+                # cancel here leaves a synced-but-unlaunched ask site --
+                # harmless (no secrets, idempotent) and documented in
+                # SKILL.md; the PIN stays adjacent to the use point so the
+                # password lives in memory for the shortest window.
+                ctx = pin_text("pin_filezilla_password", name=name,
+                               dest=entry_dest_label(p))
+                login_pw = secret_load(name, ctx)
+                if not login_pw:
+                    die(f"stored passphrase for '{name}' could not be "
+                        f"unlocked; FileZilla not launched", 4)
+                try:
+                    password_clipboard = copy_text_to_clipboard(login_pw)
+                finally:
+                    # Drop the reference only (Python strs are immutable;
+                    # no secure-zero cargo-cult) -- the clipboard staging
+                    # file above is what gets overwrite-wiped.
+                    login_pw = None
+                if password_clipboard:
+                    print("wtssh: note: login password copied to the "
+                          "clipboard (not printed); paste it into "
+                          "FileZilla's password prompt, then overwrite the "
+                          "clipboard -- do not tick 'Remember password'",
+                          file=sys.stderr)
+                else:
+                    warnings.append("login password could not be copied to "
+                                    "the clipboard; type it in FileZilla's "
+                                    "own password prompt (it was never "
+                                    "printed)")
+                    print("wtssh: warning: clipboard copy failed; type the "
+                          "login password in FileZilla's own password "
+                          "prompt (it is never printed by wtssh)",
+                          file=sys.stderr)
             exe = filezilla_exe(args)
             if tunneling == "tunnel":
                 if chain is not None:
@@ -3937,7 +4061,7 @@ def action_filezilla(args):
             "warnings": warnings,
             "launched": launched,
         }
-        if args.tunnel == "auto":
+        if getattr(args, "tunnel", False) == "auto":
             # what the menu entry's mode resolved to on THIS click
             result["tunnelAuto"] = ("tunnel" if tunneling == "tunnel"
                                     else "direct")
@@ -3982,6 +4106,11 @@ def action_filezilla(args):
                     "keyfileSource": (session_keyfile[1]
                                       if session_keyfile else None),
                 }
+        if to_clipboard:
+            # Long-lived login password: NEVER rides the JSON -- only the
+            # copy outcome does. `clipboard` above stays reserved for the
+            # ephemeral session-key passphrase.
+            result["passwordClipboard"] = password_clipboard
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if fz_proc is not None:
             # Keep this process alive for the FileZilla lifetime on BOTH
@@ -4737,6 +4866,9 @@ UI_TEXTS = {
         "pin_filezilla_export": "为 FileZilla 导出连接密钥 {key}（条目 {name}，口令随机生成、仅本次会话有效）",
         "pin_rename_key": "重命名密钥 {old} → {new}",
         "pin_rename_secret": "重命名条目 {old} → {new} 的口令",
+        "pin_filezilla_password": "为 FileZilla 复制登录口令（条目 {name}，{dest}）",
+        "clip_confirm_title": "确认复制登录口令到剪贴板",
+        "clip_confirm_body": "条目 {name}（{dest}）的登录口令将复制到剪贴板，供粘贴进 FileZilla 的密码框。\n\n剪贴板不是秘密通道：同用户任意进程可读取；Win+V 历史/云同步/RDP 剪贴板会把它带走；本工具不自动清空。请粘贴后尽快覆盖清除，且不要勾选 FileZilla 的“记住密码”。\n\n口令永不打印到终端/JSON/日志。确认复制吗？",
     },
     "en": {
         "pass": "Private key passphrase",
@@ -4756,6 +4888,9 @@ UI_TEXTS = {
         "pin_filezilla_export": "export the FileZilla connection key {key} (entry {name}; random passphrase, this session only)",
         "pin_rename_key": "rename key {old} → {new}",
         "pin_rename_secret": "rename entry {old} → {new} passphrase",
+        "pin_filezilla_password": "copy login password for FileZilla (entry {name}, {dest})",
+        "clip_confirm_title": "Confirm copying the login password to the clipboard",
+        "clip_confirm_body": "The login password for entry {name} ({dest}) will be copied to the clipboard for pasting into FileZilla's password prompt.\n\nThe clipboard is not a secret channel: any same-user process can read it; Win+V history/cloud sync/RDP clipboard will carry it away; this tool does not auto-clear it. Overwrite it right after pasting, and do not tick FileZilla's 'Remember password'.\n\nThe password is never printed to the terminal/JSON/logs. Copy it?",
     },
 }
 
@@ -7247,17 +7382,19 @@ def connect_agent_legacy(args, argv: list[str],
 
 
 def _gui_yesno(text: str, title: str) -> bool:
-    """Native Yes/No dialog for the host-key confirmation (probe mode
-    only). The prompt ssh hands to askpass carries the full fingerprint,
-    so the user chooses on real information, not blind trust. Text travels
-    base64-encoded to dodge every quoting pitfall; powershell's exit code
-    is the answer. Any dialog failure is fail-closed (returns False)."""
+    """Native Yes/No dialog (host-key confirmation and the --to-clipboard
+    secondary confirmation). Both text and title travel base64-encoded to
+    dodge every quoting pitfall; powershell's exit code is the answer. Any
+    dialog failure is fail-closed (returns False)."""
     import base64 as _b64
     b64 = _b64.b64encode(text.encode("utf-8")).decode("ascii")
+    t64 = _b64.b64encode((title or "wtssh").encode("utf-8")).decode("ascii")
     ps = ("Add-Type -AssemblyName System.Windows.Forms; "
           f"$t=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("
           f"'{b64}')); "
-          "$r=[System.Windows.Forms.MessageBox]::Show($t, 'wtssh', "
+          f"$ttl=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("
+          f"'{t64}')); "
+          "$r=[System.Windows.Forms.MessageBox]::Show($t, $ttl, "
           "'YesNo', 'Warning'); if ($r -eq [System.Windows.Forms.DialogResult]::Yes) "
           "{ exit 0 } else { exit 1 }")
     ps_exe = find_bin("powershell")
@@ -7269,6 +7406,15 @@ def _gui_yesno(text: str, title: str) -> bool:
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
+
+
+def confirm_password_to_clipboard(name: str, dest: str) -> bool:
+    """Explicit secondary confirmation for --to-clipboard (displayed, not
+    silent): a native Yes/No dialog naming the entry identity plus the
+    clipboard risks. Fail-closed -- any dialog failure reads as declined."""
+    t = ui_texts()
+    body = t["clip_confirm_body"].format(name=name, dest=dest)
+    return _gui_yesno(body, t["clip_confirm_title"])
 
 
 def _askpass_map_path() -> Path | None:
@@ -8344,6 +8490,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="path to filezilla.exe (default: "
                              "$WTSSH_FILEZILLA, then the standard install "
                              "dirs, then PATH)")
+        sp.add_argument("--to-clipboard", action="store_true",
+                        help="copy the entry's stored login password to the "
+                             "clipboard for pasting into FileZilla "
+                             "(explicit opt-in: pops a native Yes/No "
+                             "confirmation naming the entry, then a TPM PIN; "
+                             "the password is never printed to "
+                             "stdout/stderr/JSON/logs; direct-only, needs a "
+                             "stored secret, refuses with "
+                             "--no-open/--remove-site/--keyfile/--tunnel)")
         sp.set_defaults(func=action_filezilla)
         return sp
 

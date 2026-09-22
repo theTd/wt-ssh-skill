@@ -221,7 +221,7 @@ wtssh 自身 print **零 stdout**（dry-run JSON 也改走 stderr，`__askpass` 
 分隔的 Folder/Server 名，精确大小写匹配）；`sftp://` URL 带不了密钥且密码会进 argv，**不用**。「先同步
 站点、再 `-c` 启动」是安全的——每次启动都是新进程、连接前现读站点簿。
 
-`wtssh filezilla alpha [--tunnel [yes|auto]] [--keyfile <路径>] [--no-open] [--remove-site] [--filezilla <exe路径>]`：
+`wtssh filezilla alpha [--tunnel [yes|auto]] [--keyfile <路径>] [--no-open] [--remove-site] [--to-clipboard] [--filezilla <exe路径>]`：
 
 - 在 `%APPDATA%\FileZilla\sitemanager.xml` 里维护一个以**当前 `--group`**（默认 `ssh`）命名的 `<Folder>`（如 `0/ssh/alpha`），
   **不碰**用户自建的根级站点。这与 WT 菜单里 `sftp:` 伴生默认进 `sftp` 组不是同一棵树——点 `sftp:X` 仍按条目身份同步到当前 `--group` 对应的 FileZilla 文件夹。写前自动备份 `sitemanager.xml.wtssh.bak`（滚动单份），原子替换、写前解析校验；
@@ -232,6 +232,7 @@ wtssh 自身 print **零 stdout**（dry-run JSON 也改走 stderr，`__askpass` 
     - **真正启动 FileZilla 时**（无 `--no-open`）→ 弹 1 次 CNG PIN，导出临时加密 PPK v2 会话密钥并绑到站点（有跳板走隧道路径；无跳板走直连路径，站点仍写真实 `host:port`，不写通用代理）；FileZilla 退出后覆写清扫；
     - **只同步不启动**（`--no-open`）或站点已有 Keyfile → 保留已有 Keyfile，否则降级为 Logontype 2（连接时 FileZilla 自己弹密码框）并在 warnings 里说明；**绝不**把口令/密钥内容写进站点簿；
   - 无 key 条目 → ask 型（FileZilla 连接时弹密码框；stored secret 从不出脚本）。
+  - 密码登录要粘贴免输 → `--to-clipboard`（显式二次确认才复制）：先弹原生 `Yes/No` 确认框（标题为确认语、写明条目身份与剪贴板风险），确认后再弹 1 次 `CNG PIN` 解封登录口令并复制到剪贴板，口令永不打印到终端/`JSON`/日志（`JSON` 只给 `passwordClipboard:true/false`）。直连专用（有跳板解析成隧道即拒绝）、需已有 `stored secret`、条目不得绑定任何密钥（含明文 `--key` 路径：其站点是密钥型、无处可粘）、与 `--no-open/--remove-site/--keyfile/--tunnel` 互斥；`wtv:` 密钥条目无登录口令可复制（它的会话口令 phrase 本就自动进剪贴板）。`PIN` 在站点同步之后（口令在内存中存活最短），取消 `PIN` 会留下已同步未启动的 `ask` 站点——无秘密、幂等，属预期。剪贴板不是秘密通道（同用户进程可读、`Win+V` 历史/云同步/`RDP` 会带走、不自动清空；非 `ASCII` 口令经 `owner-only` 会话目录中转、用后覆写清扫，强杀残留由会话清扫器回收）：粘贴后尽快覆盖清除，不要勾 `FileZilla` 的“记住密码”；复制失败不打印口令，仍启动供手输。
 - **跳板链不可表达**：FileZilla SFTP 没有 jump host 概念，普通同步里条目的 `--jump` 被忽略并告警
   （直连语义）。**要真跳板链 → 用 `--tunnel`**（SOCKS 代理 + 真实地址，见下）。主机簿菜单里的
   `sftp:` 伴生入口固定带 `--tunnel auto`：有跳板才隧道，无跳板即普通直连——点菜单入口的人不需要知道区别。
