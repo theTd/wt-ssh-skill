@@ -3960,7 +3960,7 @@ def action_filezilla(args):
                     env["WTSSH_SETTINGS"] = str(settings_path())
                     if getattr(args, "secrets", None):
                         env["WTSSH_SECRETS"] = str(SECRETS_DIR)
-                    if getattr(args, "keys", None):
+                    if getattr(args, "keys_dir", None):
                         env["WTSSH_KEYS"] = str(KEYS_DIR)
                     try:
                         tunnel_proc = subprocess.Popen(
@@ -8237,7 +8237,13 @@ def build_parser() -> argparse.ArgumentParser:
                     "(default: auto-discovered; see $WTSSH_SETTINGS)")
     ap.add_argument("--secrets", help="override vault secrets dir "
                     "(default: %%LOCALAPPDATA%%/wtssh/secrets)")
-    ap.add_argument("--keys", help="override standalone vault keys dir "
+    # dest is NOT "keys": `agent load/unload` take a positional `keys`
+    # list, and argparse copies a subcommand's namespace over this one --
+    # a shared dest let the key-name list clobber the dir (crash /
+    # silently un-sandboxed drill). test_global_options.py guards all
+    # globals against such shadowing.
+    ap.add_argument("--keys", dest="keys_dir", metavar="KEYS_DIR",
+                    help="override standalone vault keys dir "
                     "(default: %%LOCALAPPDATA%%/wtssh/keys)")
     ap.add_argument("--agent-dir", help="override ssh-agent cache dir "
                     "(pub selectors + index; default: "
@@ -8641,9 +8647,9 @@ def main(argv=None):
     if getattr(args, "secrets", None):
         global SECRETS_DIR
         SECRETS_DIR = Path(args.secrets).resolve()
-    if getattr(args, "keys", None):
+    if getattr(args, "keys_dir", None):
         global KEYS_DIR
-        KEYS_DIR = Path(args.keys).resolve()
+        KEYS_DIR = Path(args.keys_dir).resolve()
     if getattr(args, "agent_dir", None):
         global AGENT_DIR
         AGENT_DIR = Path(args.agent_dir).resolve()
