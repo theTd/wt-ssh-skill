@@ -3358,7 +3358,7 @@ def fz_export_vault_session_key(name: str, keyname: str, blob_path: Path
             f"material; re-import it ('wtssh key remove {keyname}' "
             f"+ 'wtssh key import {keyname} <file>')", 4)
     if os.environ.get("WTSSH_NO_AGENT") != "1":
-        # Unwrap-triggered auto-stage: this PIN also refreshes the 1h agent
+        # Unwrap-triggered auto-stage: this PIN also refreshes the 8h agent
         # cache so the next ssh connect skips the PIN. FileZilla itself
         # cannot use the agent (PPK flow); the benefit lands on connects.
         try:
@@ -3728,7 +3728,7 @@ def action_filezilla(args):
                 ctx_msgid="pin_tunnel_batch")
             if os.environ.get("WTSSH_NO_AGENT") != "1":
                 # Same unwrap-triggered auto-stage as connects: this PIN
-                # refreshes the 1h agent cache for the next ssh connect.
+                # refreshes the 8h agent cache for the next ssh connect.
                 try:
                     agent_stage_unlocked(unlocked,
                                          source=f"filezilla-tunnel {name}")
@@ -5638,11 +5638,11 @@ def agent_wanted(args) -> bool:
         and os.environ.get("WTSSH_NO_AGENT") != "1"
 
 
-AUTO_AGENT_TTL_DEFAULT = "1h"
+AUTO_AGENT_TTL_DEFAULT = "8h"
 
 
 def _auto_agent_ttl() -> tuple[int, str]:
-    """TTL for unwrap-triggered auto-staging. Defaults to 1h; WTSSH_AUTO_AGENT_TTL
+    """TTL for unwrap-triggered auto-staging. Defaults to 8h; WTSSH_AUTO_AGENT_TTL
     overrides (same syntax as `agent load --ttl`). Garbage fails OPEN to the
     default with a warning -- an auto-stage must never fail a connect."""
     spec = os.environ.get("WTSSH_AUTO_AGENT_TTL") or AUTO_AGENT_TTL_DEFAULT
@@ -5651,7 +5651,7 @@ def _auto_agent_ttl() -> tuple[int, str]:
     except SystemExit:
         print(f"wtssh: warning: bad WTSSH_AUTO_AGENT_TTL {spec!r}; "
               f"using {AUTO_AGENT_TTL_DEFAULT}", file=sys.stderr)
-        return 3600, AUTO_AGENT_TTL_DEFAULT
+        return parse_agent_ttl(AUTO_AGENT_TTL_DEFAULT)
 
 
 def agent_stage_unlocked(unlocked: dict[str, tuple[bytes, str]],
@@ -5661,7 +5661,7 @@ def agent_stage_unlocked(unlocked: dict[str, tuple[bytes, str]],
     Called on the connect/FileZilla PIN paths AFTER a successful unwrap, so the
     next connect can take the PIN-free agent branch. Never raises and never
     dies: any failure (agent down, bad material, DACL) is a stderr warning and
-    the caller continues with its session containers. Records carry a 1h TTL
+    the caller continues with its session containers. Records carry an 8h TTL
     (overridable via WTSSH_AUTO_AGENT_TTL); expiry stays wtssh-side enforced.
     """
     if not unlocked:
@@ -7246,7 +7246,7 @@ def connect_rendered(args, p: dict, argv: list[str], plan: dict) -> None:
                 return  # exits by itself; kept for readability
         unlocked = _chain_unlock_keys(plan["keys"], name, dest)
         if agent_wanted(args):
-            # Unwrap-triggered auto-stage: this PIN also refreshes the 1h
+            # Unwrap-triggered auto-stage: this PIN also refreshes the 8h
             # agent cache so the NEXT connect skips the PIN. Best-effort --
             # failures only warn; this session continues with containers.
             agent_stage_unlocked(unlocked, source=f"connect {name}")
@@ -7770,7 +7770,7 @@ def action_connect(args):
         keydata = base64.b64decode(container)
         if agent_wanted(args):
             # Same unwrap-triggered auto-stage as the rendered path: this
-            # PIN refreshes the 1h agent cache for the next connect.
+            # PIN refreshes the 8h agent cache for the next connect.
             agent_stage_unlocked({keyname: (keydata, pw)},
                                  source=f"connect {args.name}")
     elif secret_path(args.name).exists():

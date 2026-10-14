@@ -49,6 +49,7 @@ def setup_env():
     os.environ["WTSSH_NO_HOSTKEY_PROBE"] = "1"
     os.environ["WTSSH_AGENT_DIR"] = str(TMP / "agent")
     os.environ.pop("WTSSH_AGENT_TTL", None)
+    os.environ.pop("WTSSH_AUTO_AGENT_TTL", None)
     os.environ.pop("WTSSH_NO_AGENT", None)
     wtssh.SETTINGS = TMP / "settings.json"
     wtssh.SECRETS_DIR = TMP / "secrets"
@@ -104,6 +105,22 @@ def ttl_tests():
         os.environ.pop("WTSSH_AGENT_TTL", None)
     for bad in ("", "0", "abc", "8x", "-5", "h"):
         check(f"reject {bad!r}", dies(wtssh.parse_agent_ttl, bad))
+    check("auto default 8h", wtssh._auto_agent_ttl() == (28800, "8h"),
+          repr(wtssh._auto_agent_ttl()))
+    os.environ["WTSSH_AUTO_AGENT_TTL"] = "30m"
+    try:
+        check("auto env override",
+              wtssh._auto_agent_ttl()[0] == 1800,
+              repr(wtssh._auto_agent_ttl()))
+    finally:
+        os.environ.pop("WTSSH_AUTO_AGENT_TTL", None)
+    os.environ["WTSSH_AUTO_AGENT_TTL"] = "bad"
+    try:
+        with redirect_stderr(io.StringIO()):
+            got = wtssh._auto_agent_ttl()
+        check("auto bad falls back to 8h", got == (28800, "8h"), repr(got))
+    finally:
+        os.environ.pop("WTSSH_AUTO_AGENT_TTL", None)
     # the load path renders this template with (name, dest, keys) only --
     # a stray placeholder would KeyError on the real (unstubbed) path
     for lang in ("zh", "en"):

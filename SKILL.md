@@ -205,8 +205,8 @@ wtssh 自身 print **零 stdout**（dry-run JSON 也改走 stderr，`__askpass` 
 管道喂 stdin 前先确认 host key 已知（未知 key 的交互确认会占用 stdin；脚本场景可用
 `WTSSH_NO_HOSTKEY_PROBE=1` 并接受失败语义）。
 
-**ssh-agent 缓存（一次 PIN，TTL 内免 PIN）**：`agent load` 把 vault 密钥（默认全部，可点名）一次解封
-（仍只 1 个 PIN 窗）后塞进系统 ssh-agent，默认有效 8h（`--ttl 8h/90m/3600`，或 `$WTSSH_AGENT_TTL`）。
+**ssh-agent 缓存（一次 PIN，TTL 内免 PIN）**：任何 vault 密钥的 TPM PIN 解封（`connect`/`run`/`filezilla --tunnel` 或直接导出会话密钥）成功后自动把涉及密钥缓存进系统 ssh-agent，默认有效 8h（`$WTSSH_AUTO_AGENT_TTL` 可改，语法同 `--ttl`；`$WTSSH_NO_AGENT=1`/`--no-agent` 可关），下次免 PIN。`agent load` 是显式预热形态：把 vault 密钥（默认全部，可点名）一次解封
+(仍只 1 个 PIN 窗）后塞进系统 ssh-agent，默认有效 8h（`--ttl 8h/90m/3600`，或 `$WTSSH_AGENT_TTL`）。
 此后 connect 若所需密钥**全部**在 agent 里（指纹实时核验）→ 走 agent 分支：pub 选择器 +
 `IdentitiesOnly yes`，无容器、无派发、**零 PIN**（stderr 会注一行）；缺任何一把 → 静默回落 PIN 路。
 `--no-agent` / `$WTSSH_NO_AGENT=1` 强制走 PIN 路。`print --plan` 的 `agentCached` 只说明哪些钥有缓存
@@ -403,6 +403,7 @@ vault 是**可选附加层**。没有 TPM / 没做过 `vault init` 的机器上�
 | `WTSSH_AGENT_DIR` | agent 缓存目录（pub 选择器 + keys.json 索引，公开材料；默认 `%LOCALAPPDATA%\wtssh\agent`；`--agent-dir` 优先级更高）；演练钩子 |
 | `WTSSH_RENDER_DRY` | 设为 `1` 时 `connect` 只物化渲染计划并打印 JSON（块/argv/配置原文），不碰 vault、不启动 ssh |
 | `WTSSH_AGENT_TTL` | `agent load` 默认有效期（`--ttl` 优先级更高），默认 `8h` |
+| `WTSSH_AUTO_AGENT_TTL` | PIN 解封触发的自动缓存有效期（语法同 `--ttl`），默认 `8h` |
 | `WTSSH_NO_AGENT` | 设为 `1` 时 connect 无视 agent 缓存（与 `--no-agent` 同效） |
 | `WTSSH_NO_HOSTKEY_PROBE` | 设为 `1` 时跳过派发前的交互式 host-key 预检（脚本场景；未知的 host key 届时仍会在连接时失败） |
 | `WTSSH_ALLOW_LOOSE_ACL` | 机密文件的 owner-only DACL 落不了地时（FAT/网络盘等无 ACL 卷），默认**拒绝运行**（fail-closed，密钥/口令映射不落盘）；设为 `1` 才降级为 chmod + 一次性警告继续 |
