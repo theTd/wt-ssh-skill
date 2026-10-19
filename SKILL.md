@@ -91,7 +91,7 @@ Windows 上 `python` 不存在时依次试 `py -3`、`python3`。脚本要求 **
 | 重命名独立密钥 | `key rename OLD NEW`（1 次 PIN 重封，所有引用条目自动重指向） |
 | 移除独立密钥 | `key remove KEYNAME`（被任何条目引用则拒绝；`--force` 剥掉引用后删——剥引用改写被拒时按报错先 `rename`/修复该条目再重试） |
 | 导出密钥到口令保护文件 | `key export KEYNAME <outfile>`（CNG PIN + 新口令二次确认；拒绝覆盖已有文件） |
-| 一次 PIN、TTL 内免 PIN（ssh-agent 缓存） | `agent load [--ttl 8h] [KEY...]`（整批只弹 1 个 PIN 窗；`agent status` 查看、`agent unload [--all]` 清除；connect 到期前自动走缓存免 PIN，`--no-agent` 强制走 PIN 路） |
+| 一次 PIN、TTL 内免 PIN（ssh-agent 缓存） | `agent load [KEY...]`（整批只弹 1 个 PIN 窗；**省略 `--ttl` 即默认 8h——agent 不要自己填 `--ttl`**，要填就用带单位的写法（`--ttl 24h`），**严禁抄裸数字**：`3600` 是秒 = 1 小时，会把用户变成每小时输一次 PIN；`agent status` 查看、`agent unload [--all]` 清除；connect 到期前自动走缓存免 PIN，`--no-agent` 强制走 PIN 路） |
 | 条目挂/换独立密钥 | `add/edit alpha ... --key wtv:KEYNAME`（也可 `--key <路径>` 用普通文件；`edit --key none` 解绑） |
 | 初始化/管理 TPM vault | `vault init`（弹 2 窗：设 PIN + 自测）/ `vault status` / `vault remove`（演练 env 下**拒绝执行**，防误删真 TPM 键——见纪律 §8） |
 | 连一下 X（connect 的别名） | `open alpha`（与 `connect` 同义；`--no-askpass` 显式退出口令派发，ssh 在终端里自己问口令） |
@@ -206,7 +206,7 @@ wtssh 自身 print **零 stdout**（dry-run JSON 也改走 stderr，`__askpass` 
 `WTSSH_NO_HOSTKEY_PROBE=1` 并接受失败语义）。
 
 **ssh-agent 缓存（一次 PIN，TTL 内免 PIN）**：任何 vault 密钥的 TPM PIN 解封（`connect`/`run`/`filezilla --tunnel` 或直接导出会话密钥）成功后自动把涉及密钥缓存进系统 ssh-agent，默认有效 8h（`$WTSSH_AUTO_AGENT_TTL` 可改，语法同 `--ttl`；`$WTSSH_NO_AGENT=1`/`--no-agent` 可关），下次免 PIN。`agent load` 是显式预热形态：把 vault 密钥（默认全部，可点名）一次解封
-(仍只 1 个 PIN 窗）后塞进系统 ssh-agent，默认有效 8h（`--ttl 8h/90m/3600`，或 `$WTSSH_AGENT_TTL`）。
+(仍只 1 个 PIN 窗）后塞进系统 ssh-agent，默认有效 8h（`--ttl` 语法同 `agent load`，**agent 默认不填**；`$WTSSH_AGENT_TTL` 可改默认）。**agent 纪律**：除非用户明确要求别的时长，`agent load` 一律**不带 `--ttl`**——示例里的裸数字是秒（`3600` = 1 小时），照抄会让用户每小时输一次 PIN。
 此后 connect 若所需密钥**全部**在 agent 里（指纹实时核验）→ 走 agent 分支：pub 选择器 +
 `IdentitiesOnly yes`，无容器、无派发、**零 PIN**（stderr 会注一行）；缺任何一把 → 静默回落 PIN 路。
 `--no-agent` / `$WTSSH_NO_AGENT=1` 强制走 PIN 路。`print --plan` 的 `agentCached` 只说明哪些钥有缓存

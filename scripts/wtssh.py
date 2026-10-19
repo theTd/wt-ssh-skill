@@ -5439,8 +5439,9 @@ def parse_agent_ttl(spec: str | None) -> tuple[int, str]:
         spec = os.environ.get("WTSSH_AGENT_TTL") or AGENT_DEFAULT_TTL
     spec = spec.strip()
     if not _AGENT_TTL_RE.match(spec):
-        die(f"bad agent TTL {spec!r}: seconds or a number with "
-            f"s/m/h/d/w suffixes (e.g. 8h, 90m, 3600)")
+        die(f"bad agent TTL {spec!r}: s/m/h/d/w suffixes (8h, 90m, "
+            f"1h30m) or plain seconds -- a bare number is SECONDS, so "
+            f"3600 is just 1h; omit --ttl for the default 8h")
     total = 0
     for num, unit in re.findall(r"(\d+)\s*([smhdwSMHDW]?)", spec):
         if not num:
@@ -8435,12 +8436,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "until the TTL expires")
     agent_sub = sp.add_subparsers(dest="agent_cmd", required=True)
     asp = agent_sub.add_parser("load", help="unwrap vault keys (ONE PIN for "
-                               "the batch) and cache them in ssh-agent for "
-                               "--ttl (default: $WTSSH_AGENT_TTL or 8h)")
+                               "the batch) and cache them in ssh-agent "
+                               "(default TTL: $WTSSH_AGENT_TTL or 8h; omit "
+                               "--ttl unless the user asked for a different "
+                               "lifetime)")
     asp.add_argument("keys", nargs="*", help="vault keys to load "
                      "(default: all standalone keys)")
-    asp.add_argument("--ttl", help="cache lifetime: seconds or s/m/h/d/w "
-                     "suffixes (e.g. 8h, 90m)")
+    asp.add_argument("--ttl", help="cache lifetime (omit for the default "
+                     "8h): s/m/h/d/w suffixes (8h, 90m, 1h30m) or plain "
+                     "seconds -- a bare number is SECONDS, so 3600 means "
+                     "only 1h")
     asp.set_defaults(func=action_agent_load)
     asp = agent_sub.add_parser("unload", help="drop wtssh-cached keys from "
                                "ssh-agent (default: our live-tracked keys "

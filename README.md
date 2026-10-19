@@ -59,7 +59,7 @@ python scripts/wtssh.py doctor alpha
 | 导入 OpenSSH config | `import [--ssh-config PATH]` |
 | 口令进 vault / 去掉 / 查有哪些 | `secret set NAME`、`secret remove NAME`、`secret list`（无 `get`） |
 | 独立密钥（无需主机条目） | `key import KEYNAME FILE [--move]`、`key list`、`key rename OLD NEW`、`key remove KEYNAME`、`key export KEYNAME OUTFILE` |
-| 一次 PIN、TTL 内免 PIN | `agent load [--ttl 8h] [KEY...]`、`agent status`、`agent unload [--all]` |
+| 一次 PIN、TTL 内免 PIN | `agent load [KEY...]`（省略 `--ttl` 即默认 8h；`--ttl` 写法 `8h`/`90m`/`1h30m`，**裸数字是秒，`3600` 只有 1 小时**）、`agent status`、`agent unload [--all]` |
 | 连 / 跑命令 | `connect NAME`（别名 `open`）、`run NAME -- CMD...`（裸写 `wtssh NAME CMD...` 等价） |
 | FileZilla | `filezilla NAME`（别名 `fz`）、`--tunnel [yes|auto]` 走跳板隧道、`--no-open` 只同步、`--remove-site` 清理 |
 | SFTP 菜单伴生 | `edit X --sftp`（去掉用 `--no-sftp`；跟 SSH 同组用 `--sftp-group ssh`） |
