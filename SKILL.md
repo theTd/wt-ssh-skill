@@ -215,6 +215,13 @@ wtssh 自身 print **零 stdout**（dry-run JSON 也改走 stderr，`__askpass` 
 `agent unload`（默认摘 wtssh 跟踪的钥——活着的 + 已过期的，不动用户手加的；`--all` = `ssh-add -D` 会连用户自己的
 一起清）。agent 服务没起时 `agent status` 会给 `Start-Service ssh-agent` 指引。
 
+**native OpenSSH 解析**：`ssh`/`ssh-add`/`ssh-keygen` 只取 **native**（Win32）OpenSSH——MSYS2/Cygwin 构建
+（落在 `usr\bin` 下，或同目录有 `msys-2.0.dll`/`cygwin1.dll`，Git Bash 的 `/usr/bin` 就是）走 `$SSH_AUTH_SOCK`、
+看不见 Windows agent 管道（`\\.\pipe\openssh-ssh-agent`），一律跳过；三者优先取**同一套** native 套件（PATH 上
+第一支 native `ssh.exe` 所在目录，agent 里的钥才对得上连出去的那个 ssh），其余 native 候选次之，最后回落
+`%SystemRoot%\System32\OpenSSH`。`agent status` 输出带 `sshAdd`（实际用的 ssh-add 路径），报 `no-agent`
+时先看它是不是被换成了 MSYS 的。
+
 ### FileZilla 桥（`filezilla NAME`，别名 `fz`）
 
 `filezilla.exe -c <site-path>` 可命令行直连 Site Manager 里的一个站点（site-path = 字面根 `0` + `/`
@@ -415,7 +422,10 @@ vault 是**可选附加层**。没有 TPM / 没做过 `vault init` 的机器上�
 - **启动器 shim**：routed 条目与 `sftp:` 伴生条目的 `commandline` 指向 `%LOCALAPPDATA%\wtssh\wtssh.cmd`
   （内容 = 解释器 + `wtssh.py` 绝对路径），由相关写操作保证存在、内容漂移即重写。**shim 路径不变**时，
   Python 被移动/重装后重跑任一这类写操作即可恢复**全部** routed 条目（它们指向 shim 文件本身，不用逐条改）；
-  `WTSSH_SHIM_DIR` 变了则只有本次写操作触及的条目跟上。
+  `WTSSH_SHIM_DIR` 变了则只有本次写操作触及的条目跟上。**自愈**：每次 wtssh 调用都做一次廉价检查——shim
+  存在、但它引用的解释器或 `wtssh.py` 已不存在（skill 目录搬家、Python 重装/卸载）时立即按当前解释器 + 本
+  脚本原子重写；引用文件都还在则**一字不改**（两份活副本不会互相回写）。shim 不存在时只由写操作创建，只读
+  调用不生成。
 
 ## 安全与纪律（MUST）
 
@@ -444,3 +454,6 @@ vault 是**可选附加层**。没有 TPM / 没做过 `vault init` 的机器上�
    `agent status` 或 mock，真加真删只在用户明确要求时做。
 9. **跳板默认不进菜单**：见上文「跳板机 vs 主机簿」。向用户汇报主机列表时，报 `groups`（菜单）即可；
    `hidden` 是给 `--jump` 用的身份条目，不要当成下拉菜单里的服务器。
+10. **一个任务里连多次，先 `agent load` 一次**：同一任务要跑多个 `run`/`connect` 前，先 `wtssh agent load`
+   一次（整批只 1 个 PIN，默认 8h TTL 内免 PIN），不要让每次调用各弹一次 PIN 逼用户反复输入——2026-10-27
+   有过 agent 每一跳都让用户输 PIN 的事故。

@@ -13,6 +13,7 @@ key, talks to ssh-agent, or touches the live config.
 Run:  python tests/test_global_options.py   (or via pytest)
 """
 import argparse
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -29,6 +30,10 @@ def setup_env():
     wtssh.SECRETS_DIR = TMP / "secrets"
     wtssh.AGENT_DIR = TMP / "agent"
     wtssh.SETTINGS = TMP / "settings.json"
+    # main() self-heals the launcher shim on EVERY invocation; without this
+    # hook a drill would rewrite %LOCALAPPDATA%\wtssh\wtssh.cmd (SKILL.md §8)
+    os.environ["WTSSH_SHIM_DIR"] = str(TMP / "shim")
+    (TMP / "shim").mkdir(parents=True, exist_ok=True)
 
 
 def _drive(argv, action_attr):

@@ -282,6 +282,11 @@ def test_main_converts_dacl_error():
     wtssh.action_doctor = boom_action
     err = _CaptureErr()
     code = None
+    # main() self-heals the launcher shim before dispatch: keep that inside
+    # the drill sandbox (SKILL.md §8), never the live %LOCALAPPDATA% one
+    saved_shim = os.environ.get("WTSSH_SHIM_DIR")
+    os.environ["WTSSH_SHIM_DIR"] = str(TMP / "shim")
+    (TMP / "shim").mkdir(parents=True, exist_ok=True)
     try:
         with redirect_stderr(err):
             try:
@@ -290,6 +295,10 @@ def test_main_converts_dacl_error():
                 code = e.code
     finally:
         wtssh.action_doctor = real
+        if saved_shim is None:
+            os.environ.pop("WTSSH_SHIM_DIR", None)
+        else:
+            os.environ["WTSSH_SHIM_DIR"] = saved_shim
     check("main() converts DaclError to clean die(4) with remediation",
           code == 4 and "cannot apply the owner-only DACL" in err.getvalue()
           and "WTSSH_ALLOW_LOOSE_ACL=1" in err.getvalue(),

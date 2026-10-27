@@ -186,6 +186,17 @@ _BIN_ANCHORS = {
                    "System32/WindowsPowerShell/v1.0/powershell.exe"),
     "clip": ("SystemRoot", "System32/clip.exe"),
 }
+# The Windows OpenSSH client family shares ONE agent named pipe
+# (\\.\pipe\openssh-ssh-agent). MSYS2/Cygwin builds of the same binaries
+# (Git for Windows' usr\bin, MSYS2's usr\bin) talk to $SSH_AUTH_SOCK instead,
+# so with Git Bash's usr\bin ahead of System32 in PATH they cannot see keys
+# the Windows service agent holds: agent status answered "no-agent" and a
+# load died with "Could not open a connection to your authentication agent"
+# while the service was plainly running (observed 2026-10-27). The family is
+# resolved as one NATIVE suite instead -- a native Windows OpenSSH anywhere
+# on PATH stays acceptable, since it uses the same agent pipe as System32's.
+OPENSSH_FAMILY = frozenset(("ssh", "ssh-add", "ssh-keygen"))
+_MSYS_RUNTIME_DLLS = ("msys-2.0.dll", "msys-1.0.dll", "cygwin1.dll")
 
 
 def _bin_in_cwd(found: str) -> bool:
@@ -197,6 +208,90 @@ def _bin_in_cwd(found: str) -> bool:
         return False
 
 
+def _is_posix_build(path: str) -> bool:
+    """True for an MSYS2/Cygwin build of a POSIX binary: its runtime DLL sits
+    next to it (msys-2.0.dll / cygwin1.dll), or it lives in the POSIX
+    <prefix>/usr/bin layout both of those installers use. Such builds resolve
+    the agent from $SSH_AUTH_SOCK and never see the Windows service agent."""
+    parent = Path(path).parent
+    if parent.name.lower() == "bin" and parent.parent.name.lower() == "usr":
+        return True
+    return any((parent / dll).is_file() for dll in _MSYS_RUNTIME_DLLS)
+
+
+def _path_hits(name: str) -> list[str]:
+    """Every absolute PATH hit for `name`, in search order, CWD excluded.
+
+    shutil.which()'s own CWD prepend is not reused: each PATH entry is probed
+    on its own, a relative entry (., bin) can only yield a non-absolute hit
+    which is dropped, and a hit inside the CWD is dropped like find_bin always
+    did. The name is joined with the entry before which(): which(name, path=
+    entry) still prepends "." (win32 curdir search), so a planted ssh.exe in
+    the CWD would mask EVERY per-directory hit. Duplicated PATH entries
+    collapse to their first hit."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if not entry:
+            continue  # empty PATH entry == the CWD: never resolve from there
+        hit = shutil.which(os.path.join(entry, name))
+        if not hit or not os.path.isabs(hit) or _bin_in_cwd(hit):
+            continue
+        key = os.path.normcase(hit)
+        if key not in seen:
+            seen.add(key)
+            out.append(hit)
+    return out
+
+
+# First native ssh.exe on PATH -> the suite the whole family resolves from.
+# Memoized per PATH string: find_bin runs per entry in doctor, and the PATH
+# cannot change under a real process (tests flip it, hence the string key).
+_suite_dir_cache: dict[str, Path | None] = {}
+
+
+def _openssh_suite_dir() -> Path | None:
+    key = os.environ.get("PATH", "")
+    if key not in _suite_dir_cache:
+        suite = None
+        for hit in _path_hits("ssh"):
+            if not _is_posix_build(hit):
+                suite = Path(hit).parent
+                break
+        _suite_dir_cache[key] = suite
+    return _suite_dir_cache[key]
+
+
+def _anchor_for(name: str) -> str | None:
+    anchor = _BIN_ANCHORS.get(name.lower().removesuffix(".exe"))
+    if anchor and os.environ.get(anchor[0]):
+        cand = Path(os.environ[anchor[0]]) / anchor[1]
+        if cand.is_file():
+            return str(cand)
+    return None
+
+
+def _resolve_openssh(name: str) -> str | None:
+    """Native-only resolution for one OpenSSH family member: the suite first
+    (so ssh-add's loaded keys are visible to the ssh that connects), then the
+    remaining PATH hits in order with every MSYS2/Cygwin build skipped, then
+    the System32 anchor. A native Windows OpenSSH elsewhere on PATH stays
+    acceptable -- it uses the same named pipe."""
+    suite = _openssh_suite_dir()
+    if suite is not None:
+        # join before which(), same reason as _path_hits: a path kwarg still
+        # gets "." prepended on win32 and a CWD plant would mask the suite
+        hit = shutil.which(os.path.join(str(suite), name))
+        if hit and os.path.isabs(hit) and not _bin_in_cwd(hit) \
+                and not _is_posix_build(hit):
+            return hit
+    for hit in _path_hits(name):
+        if not _is_posix_build(hit):
+            return hit
+    return _anchor_for(name)
+
+
 def find_bin(name: str) -> str | None:
     """Absolute path of what `name` would execute, or None.
 
@@ -205,7 +300,10 @@ def find_bin(name: str) -> str | None:
     guessed; a bare name resolves through PATH with the CWD excluded --
     NoDefaultCurrentDirectoryInExePath (set in main) makes shutil.which()
     agree, and the isabs/CWD checks below enforce it even where that env
-    var is not set (tests, direct imports) -- then the System32 anchor."""
+    var is not set (tests, direct imports) -- then the System32 anchor.
+    The OpenSSH family (ssh, ssh-add, ssh-keygen) additionally skips
+    MSYS2/Cygwin builds: they talk to $SSH_AUTH_SOCK, not the Windows agent
+    pipe, so mixing one in silently breaks the agent path."""
     if name.startswith("~"):
         p = Path(name).expanduser()
         return str(p) if (p.is_absolute() and p.is_file()) else None
@@ -214,15 +312,12 @@ def find_bin(name: str) -> str | None:
         return str(p) if p.is_file() else None
     if os.path.basename(name) != name:
         return None  # explicit relative form: refusing beats resolving it
+    if name.lower().removesuffix(".exe") in OPENSSH_FAMILY:
+        return _resolve_openssh(name)
     found = shutil.which(name)
     if found and os.path.isabs(found) and not _bin_in_cwd(found):
         return found
-    anchor = _BIN_ANCHORS.get(name.lower().removesuffix(".exe"))
-    if anchor and os.environ.get(anchor[0]):
-        cand = Path(os.environ[anchor[0]]) / anchor[1]
-        if cand.is_file():
-            return str(cand)
-    return None
+    return _anchor_for(name)
 
 
 def resolve_bin(name: str) -> str:
@@ -287,11 +382,70 @@ def shim_path() -> Path:
     return Path(os.environ.get("WTSSH_SHIM_DIR", LOCALAPPDATA / "wtssh")) / "wtssh.cmd"
 
 
-def ensure_shim() -> Path:
-    """(Re)write the launcher when its content drifted; returns its path."""
-    shim = shim_path()
-    body = ("@echo off\r\n"
+def _shim_body() -> bytes:
+    """The canonical launcher: THIS interpreter + this very script."""
+    return ("@echo off\r\n"
             f'"{sys.executable}" "{SCRIPTS / "wtssh.py"}" %*\r\n').encode("utf-8")
+
+
+def _shim_dead(body: str) -> bool:
+    """True when an existing launcher names an interpreter or wtssh.py that is
+    GONE (skill directory moved, Python reinstalled or removed). A launcher
+    whose targets still exist is never dead: two live copies of the skill must
+    not keep rewriting the shim back and forth. A body that names no wtssh.py
+    at all is someone else's launcher -- we cannot prove its targets missing,
+    so it is left alone."""
+    quoted = re.findall(r'"([^"]*)"', body)
+    if not quoted:
+        return True  # no program on the line: dead on arrival
+    at = next((i for i, q in enumerate(quoted)
+               if Path(q).name.lower() == "wtssh.py"), None)
+    if at is None:
+        return False  # not a wtssh launcher: not ours to rewrite
+    # Our body is `"<interpreter>" "<wtssh.py>" %*`: the interpreter is the
+    # quoted token right before the script. A lone script token still gets
+    # its own existence checked.
+    targets = [quoted[at]]
+    if at:
+        targets.insert(0, quoted[at - 1])
+    if not all(Path(t).is_absolute() for t in targets):
+        return True  # relative launcher: dead from any other directory
+    return not all(Path(t).is_file() for t in targets)
+
+
+def heal_shim() -> None:
+    """Per-invocation, cheap self-heal for the routed-entry launcher.
+
+    A shim that exists but points at a moved/removed interpreter or wtssh.py
+    leaves every routed ssh/sftp tab dead ("can't open file ...wtssh.py")
+    until the next WRITE operation -- which a user of a read-only command may
+    never run. Rewrite it in place on ANY invocation. Never CREATE one here:
+    read-only commands must not drop files, and no routed entry can reference
+    an absent shim anyway. A failed rewrite is a warning, never a failed
+    read-only command."""
+    shim = shim_path()
+    try:
+        body = shim.read_bytes().decode("utf-8", "replace")
+    except OSError:
+        return
+    if not _shim_dead(body):
+        return
+    try:
+        atomic_write(shim, _shim_body())
+    except OSError as e:
+        print(f"wtssh: warning: the launcher shim {shim} points at a missing "
+              f"interpreter or script and could not be repaired ({e}); "
+              f"routed ssh/sftp tabs will fail until it is rewritten",
+              file=sys.stderr)
+
+
+def ensure_shim() -> Path:
+    """(Re)write the launcher when its content drifted; returns its path.
+    Write operations own CREATE and the "point at the running copy" rule;
+    the read-path self-heal above is deliberately narrower -- a live shim
+    naming another live copy of the skill is left untouched there."""
+    shim = shim_path()
+    body = _shim_body()
     if not shim.exists() or shim.read_bytes() != body:
         shim.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(shim, body)
@@ -5466,6 +5620,17 @@ def _run_ssh_add(argv: list[str]):
                           text=True, timeout=60)
 
 
+def _ssh_add_label() -> str:
+    """The ssh-add wtssh will actually run, for failure messages.
+
+    The 2026-10-27 incident: an MSYS build answering "Could not open a
+    connection to your authentication agent" left every hint pointing at the
+    Windows service instead of the binary. Name the binary (find_bin is the
+    same resolver _run_ssh_add uses) so the mismatch is diagnosable. Never
+    dies -- this only feeds diagnostics."""
+    return find_bin("ssh-add") or "ssh-add (not found)"
+
+
 def agent_list_live(strict: bool = True) -> tuple[str, dict[str, str]]:
     """Read-only agent inventory: ("ok"|"empty"|"no-agent", {fp: comment}).
     `ssh-add -l` exit codes: 0 keys listed, 1 no identities, 2 no agent
@@ -5669,6 +5834,10 @@ def agent_stage_unlocked(unlocked: dict[str, tuple[bytes, str]],
         return []
     staged: list[str] = []
     fresh: dict = {}
+    # Named in every failure below: an MSYS ssh-add answering "Could not open
+    # a connection to your authentication agent" is otherwise indistinguishable
+    # from a stopped service (2026-10-27).
+    add_bin = _ssh_add_label()
     try:
         ttl_secs, ttl_label = _auto_agent_ttl()
         for key, (keydata, pw) in unlocked.items():
@@ -5691,19 +5860,21 @@ def agent_stage_unlocked(unlocked: dict[str, tuple[bytes, str]],
                     proc = _run_ssh_add([str(keyfile)])
                 except (OSError, subprocess.SubprocessError) as e:
                     print(f"wtssh: warning: auto-agent skipped key '{disk}': "
-                          f"ssh-add could not run ({e})", file=sys.stderr)
+                          f"ssh-add could not run ({e}) [binary: {add_bin}]",
+                          file=sys.stderr)
                     continue
                 if proc.returncode != 0:
                     print(f"wtssh: warning: auto-agent skipped key '{disk}': "
                           f"ssh-add refused it: "
-                          f"{(proc.stderr or proc.stdout or 'unknown').strip()}",
-                          file=sys.stderr)
+                          f"{(proc.stderr or proc.stdout or 'unknown').strip()} "
+                          f"[binary: {add_bin}]", file=sys.stderr)
                     continue
                 fp = agent_fp_of_pub(pub)
                 _state, live = agent_list_live(strict=False)
                 if fp not in live:
                     print(f"wtssh: warning: auto-agent skipped key '{disk}': "
-                          f"fingerprint not listed after ssh-add", file=sys.stderr)
+                          f"fingerprint not listed after ssh-add "
+                          f"[binary: {add_bin}]", file=sys.stderr)
                     continue
                 try:
                     AGENT_DIR.mkdir(parents=True, exist_ok=True)
@@ -5793,6 +5964,10 @@ def action_agent_load(args):
     failed: list[dict] = []
     fresh: dict = {}
     save_error: str | None = None
+    # Same diagnosis rule as the auto-stage warnings: every failure names the
+    # ssh-add that was used, so an MSYS build cannot masquerade as a stopped
+    # agent service.
+    add_bin = _ssh_add_label()
     try:
         for key in targets:
             tmpdir: Path | None = None
@@ -5814,13 +5989,15 @@ def action_agent_load(args):
                 except (OSError, subprocess.SubprocessError) as e:
                     failed.append({
                         "key": key,
-                        "reason": f"ssh-add could not run: {e}"})
+                        "reason": f"ssh-add could not run: {e} "
+                                  f"[binary: {add_bin}]"})
                     continue
                 if proc.returncode != 0:
                     failed.append({
                         "key": key, "reason": (
                             f"ssh-add refused it: "
-                            f"{(proc.stderr or proc.stdout or 'unknown').strip()}")})
+                            f"{(proc.stderr or proc.stdout or 'unknown').strip()} "
+                            f"[binary: {add_bin}]")})
                     continue
                 fp = agent_fp_of_pub(pub)
                 _state, live = agent_list_live(strict=False)
@@ -5829,7 +6006,8 @@ def action_agent_load(args):
                         "key": key,
                         "reason": "ssh-add reported success but the "
                                   "fingerprint is not listed -- the agent may "
-                                  "have restarted; retry the load"})
+                                  f"have restarted; retry the load "
+                                  f"[binary: {add_bin}]"})
                     continue
                 AGENT_DIR.mkdir(parents=True, exist_ok=True)
                 pub_path = agent_pub_path(key)
@@ -5987,12 +6165,13 @@ def action_agent_status(args):
             "expired": not isinstance(exp, int) or exp <= now,
         })
     out: dict = {"agent": state,
+                 "sshAdd": _ssh_add_label(),
                  "defaultTtl": (os.environ.get("WTSSH_AGENT_TTL")
                                 or AGENT_DEFAULT_TTL),
                  "keys": rows}
     if state == "no-agent":
-        out["hint"] = ("ssh-agent is not reachable; start it once "
-                       "('Start-Service ssh-agent', optionally "
+        out["hint"] = (f"ssh-agent is not reachable via '{out['sshAdd']}'; "
+                       "start it once ('Start-Service ssh-agent', optionally "
                        "'Set-Service ssh-agent -StartupType Automatic') "
                        "and retry 'wtssh agent load'")
     print(json.dumps(out, ensure_ascii=False))
@@ -8678,6 +8857,12 @@ def main(argv=None):
             print("wtssh: note: WTSSH_AGENT_DIR is set (drill mode); the "
                   "index is sandboxed but ssh-add still talks to the "
                   "REAL agent", file=sys.stderr)
+    # Every invocation, not only the write paths: routed tabs execute this
+    # shim, so once the skill directory moves a read-only command user would
+    # never repair it (observed 2026-10-27: a dead shim broke every routed
+    # ssh/sftp entry). One small read; a shim whose targets still exist is
+    # left byte-identical, and a missing shim is never created here.
+    heal_shim()
     try:
         args.func(args)
     except DaclError as e:
